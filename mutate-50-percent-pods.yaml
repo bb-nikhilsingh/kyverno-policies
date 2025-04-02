@@ -1,0 +1,61 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: mutate-pods-50-percent
+  annotations:
+    policies.kyverno.io/title: The policy mutates 50% of the pods in a deployment and adds an annotation.
+    policies.kyverno.io/subject: Pods
+    policies.kyverno.io/description: >-
+      The policy mutates 50% of the pods in a deployment and adds an annotation kyverno-50-percent-patch-applied=true.
+      The deployment namespace should have the label 50test=true.
+      The policy doesn't guarantee exactly 50% distribution. It tries to keep it close to 50%. 
+    pod-policies.kyverno.io/autogen-controllers: none #required to disable auotgen rules for different controllers
+spec:
+  failurePolicy: Ignore
+  rules:
+    - name: add-annotation-to-half-pods
+      context:
+        # Step 1: Retrieve the deployment name using the pod’s owner reference
+        - name: deploymentName
+          apiCall:
+            urlPath: "/apis/apps/v1/namespaces/{{request.namespace}}/replicasets/{{request.object.metadata.ownerReferences[0].name}}"
+            jmesPath: "metadata.ownerReferences[0].name"  # Retrieve the Deployment name from the ReplicaSet’s owner reference
+        
+        # Step 2: Calculate 50% of the total replica count
+        - name: halfReplicaCount
+          apiCall:
+            urlPath: "/apis/apps/v1/namespaces/{{request.namespace}}/deployments/{{deploymentName}}"
+            jmesPath: "divide(spec.replicas, `2`)"
+
+        # Step 3: Calculate the count of annotated pods
+        - name: annotatedPodsCount
+          apiCall:
+            urlPath: "/api/v1/namespaces/{{request.namespace}}/pods?labelSelector=app={{deploymentName}}"
+            jmesPath: "items[?metadata.annotations.\"kyverno-50-percent-patch-applied\"=='true'] | length(@)"
+
+      #Precondition to only add annotation to pods if annotatedPodsCount is less than 50% of replicaCount
+      preconditions:
+        all:
+          - key: "{{annotatedPodsCount}}"
+            operator: LessThan
+            value: "{{halfReplicaCount}}"
+          - key: "{{request.object.metadata.ownerReferences[0].kind}}"
+            operator: Equals
+            value: "ReplicaSet"
+
+      match:
+        resources:
+          kinds:
+            - Pod
+          namespaceSelector:
+            matchExpressions:
+              - key: 50test
+                operator: In
+                values:
+                - "true"
+                
+      mutate:
+        patchStrategicMerge:
+          metadata:
+            annotations:
+              kyverno-50-percent-patch-applied: "true"  # To identify patched pods
